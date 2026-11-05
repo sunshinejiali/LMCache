@@ -5,6 +5,10 @@ The ``lmcache quota`` command manages per-salt cache quotas on a running
 LMCache server. Quotas are soft limits: exceeding a quota triggers eviction
 on the next cycle (~1 s) rather than rejecting writes.
 
+Quote salt arguments containing spaces or shell-special characters, for example
+``lmcache quota get 'tenant#blue'``. The CLI percent-encodes salts in request
+paths, so characters such as ``#``, ``?`` and Unicode remain part of the salt.
+
 .. code-block:: bash
 
    lmcache quota <sub-command> [options]

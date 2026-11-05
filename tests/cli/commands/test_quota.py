@@ -4,6 +4,7 @@
 # Standard
 from unittest.mock import MagicMock, patch
 import argparse
+import json
 import sys
 
 # Inject a fake openai module so that the auto-discovery of
@@ -59,6 +60,48 @@ class TestQuotaCommandMetadata:
 
 
 class TestQuotaCommandExecute:
+    @pytest.mark.parametrize("operation", ["set", "get", "delete"])
+    @pytest.mark.parametrize(
+        "salt,path_salt",
+        [
+            ("tenant#blue", "tenant%23blue"),
+            ("tenant?plan=pro", "tenant%3Fplan%3Dpro"),
+            ("tenant one", "tenant%20one"),
+            ("tenant%2Fblue", "tenant%252Fblue"),
+            ("租户", "%E7%A7%9F%E6%88%B7"),
+            ("", "_default"),
+            ("tenant1", "tenant1"),
+        ],
+    )
+    def test_salt_is_encoded_only_in_request_path(
+        self,
+        operation: str,
+        salt: str,
+        path_salt: str,
+        cmd: QuotaCommand,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Exercise urllib request construction and preserve the displayed salt."""
+        argv = ["quota", operation, salt]
+        if operation == "set":
+            argv.extend(["--limit-gb", "1"])
+        with patch("urllib.request.urlopen") as urlopen:
+            # Omit cache_salt so output also exercises the original-value fallback.
+            urlopen.return_value.__enter__.return_value.read.return_value = (
+                b'{"limit_gb": 1, "exists": true, "status": "ok"}'
+            )
+            cmd.execute(parser.parse_args(argv))
+        request = urlopen.call_args.args[0]
+        assert request.selector == f"/quota/{path_salt}"
+        assert (
+            request.get_method()
+            == {"set": "PUT", "get": "GET", "delete": "DELETE"}[operation]
+        )
+        if operation == "set":
+            assert json.loads(request.data) == {"limit_gb": 1.0}
+        assert (salt or DEFAULT_SALT_SENTINEL) in capsys.readouterr().out
+
     @patch("lmcache.cli.commands.quota.set_command.http_request")
     def test_set(
         self,
