@@ -179,7 +179,8 @@ class GDSContext:
         self._buffers: list[torch.Tensor] = []
         self._base_ptrs: list[int] = []
         self._nbytes: list[int] = []
-        self._registered_streams: set[int] = set()  # maintained for close()
+        # Successful buffer registrations per stream, guarded by _registry_lock.
+        self._stream_buffer_counts: dict[int, int] = {}
 
     def initialize(self, config: GdsL1Config) -> None:
         """Create + clear the slab and register it with the GDS library.
@@ -236,6 +237,7 @@ class GDSContext:
 
         Registered as contiguous <=16 MiB regions (the GDS buffer-registration
         cap); :meth:`transfer_async` splits transfers at these boundaries.
+        Buffers on the same stream share one native stream registration.
 
         Args:
             buffer: Contiguous GPU staging buffer, 4 KiB-aligned in size.
@@ -250,14 +252,15 @@ class GDSContext:
             stream_registered = False
             registered_regions: list[torch.Tensor] = []
             try:
-                if raw_stream not in self._registered_streams:
+                if raw_stream not in self._stream_buffer_counts:
                     self.backend.register_stream(raw_stream)
-                    self._registered_streams.add(raw_stream)
+                    self._stream_buffer_counts[raw_stream] = 0
                     stream_registered = True
                 for start in range(0, nbytes, _MAX_GDS_REGION):
                     region = buf[start : min(start + _MAX_GDS_REGION, nbytes)]
                     self._register_region_locked(region)
                     registered_regions.append(region)
+                self._stream_buffer_counts[raw_stream] += 1
             except BaseException:
                 for region in reversed(registered_regions):
                     try:
@@ -273,14 +276,15 @@ class GDSContext:
                         logger.exception(
                             "GDSContext: failed to roll back stream registration"
                         )
-                    self._registered_streams.discard(raw_stream)
+                    self._stream_buffer_counts.pop(raw_stream, None)
                 raise
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
-        """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
+        """Deregister a buffer and release its stream after the last buffer.
 
         Args:
-            buffer: The buffer passed to :meth:`register_gpu_buffer`.
+            buffer: The buffer passed to :meth:`register_gpu_buffer`. Call on
+                the same stream used for registration.
         """
         if not self.initialized:
             return
@@ -295,14 +299,16 @@ class GDSContext:
                 self._deregister_region_locked(
                     buf[start : min(start + _MAX_GDS_REGION, nbytes)]
                 )
-            if raw_stream in self._registered_streams:
+            if raw_stream in self._stream_buffer_counts:
+                self._stream_buffer_counts[raw_stream] -= 1
+            if self._stream_buffer_counts.get(raw_stream) == 0:
                 try:
                     self.backend.deregister_stream(raw_stream)
                 except Exception as e:
                     logger.warning(
                         "GDSContext.deregister_gpu_buffer: deregister_stream: %s", e
                     )
-                self._registered_streams.discard(raw_stream)
+                self._stream_buffer_counts.pop(raw_stream)
         # Stream is synced above, so its submissions' DMAs are done -- drop them.
         with self._submissions_lock:
             self._submissions.pop(raw_stream, None)
@@ -371,12 +377,12 @@ class GDSContext:
             self._buffers.clear()
             self._base_ptrs.clear()
             self._nbytes.clear()
-            for raw_stream in list(self._registered_streams):
+            for raw_stream in list(self._stream_buffer_counts):
                 try:
                     self.backend.deregister_stream(raw_stream)
                 except Exception as e:
                     logger.warning("GDSContext.close: deregister_stream: %s", e)
-            self._registered_streams.clear()
+            self._stream_buffer_counts.clear()
         if self._slab_handle is not None:
             try:
                 self._slab_handle.close()

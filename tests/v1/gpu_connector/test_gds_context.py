@@ -212,7 +212,9 @@ class TestSingleton:
 
 @pytest.fixture
 def backend() -> Mock:
-    return Mock(spec=GDSBackend)
+    mock_backend = Mock(spec=GDSBackend)
+    mock_backend.name = "mock"
+    return mock_backend
 
 
 class TestRegisterGpuBuffer:
@@ -325,6 +327,72 @@ class TestResolveBuffer:
 class TestPerStreamRegistration:
     """Each distinct stream is cuFile-registered once and deregistered once its
     last region is gone -- observed at the backend interface (no private state)."""
+
+    @pytest.mark.parametrize("first_size", [4096, 24 << 20])
+    def test_shared_stream_survives_until_last_buffer(
+        self, monkeypatch: pytest.MonkeyPatch, backend: Mock, first_size: int
+    ) -> None:
+        """Releasing a buffer, including a split one, preserves its peers' stream."""
+        ctx = GDSContext(backend)
+        ctx.initialize(GdsL1Config(file_location="unused", size_in_bytes=64 << 20))
+        _use_fake_stream(monkeypatch, 11)
+        first = torch.empty(first_size, dtype=torch.uint8)
+        second = torch.empty(4096, dtype=torch.uint8)
+        try:
+            ctx.register_gpu_buffer(first)
+            ctx.register_gpu_buffer(second)
+            backend.register_stream.assert_called_once_with(11)
+
+            ctx.deregister_gpu_buffer(first)
+            backend.deregister_stream.assert_not_called()
+
+            ctx.deregister_gpu_buffer(second)
+            backend.deregister_stream.assert_called_once_with(11)
+        finally:
+            ctx.close()
+        backend.deregister_stream.assert_called_once_with(11)
+
+    def test_close_releases_shared_stream_with_remaining_buffer(
+        self, monkeypatch: pytest.MonkeyPatch, backend: Mock
+    ) -> None:
+        """Shutdown releases a shared stream exactly once after partial teardown."""
+        ctx = GDSContext(backend)
+        ctx.initialize(GdsL1Config(file_location="unused", size_in_bytes=8192))
+        _use_fake_stream(monkeypatch, 11)
+        first = torch.empty(4096, dtype=torch.uint8)
+        second = torch.empty(4096, dtype=torch.uint8)
+        try:
+            ctx.register_gpu_buffer(first)
+            ctx.register_gpu_buffer(second)
+            ctx.deregister_gpu_buffer(first)
+            backend.deregister_stream.assert_not_called()
+        finally:
+            ctx.close()
+        backend.deregister_stream.assert_called_once_with(11)
+        assert backend.deregister_buffer.call_count == 2
+
+    def test_failed_shared_registration_does_not_retain_stream(
+        self, monkeypatch: pytest.MonkeyPatch, backend: Mock
+    ) -> None:
+        """A partially registered buffer must not extend the shared stream's life."""
+        ctx = GDSContext(backend)
+        ctx.initialize(GdsL1Config(file_location="unused", size_in_bytes=64 << 20))
+        _use_fake_stream(monkeypatch, 11)
+        first = torch.empty(4096, dtype=torch.uint8)
+        failed = torch.empty(24 << 20, dtype=torch.uint8)
+        try:
+            ctx.register_gpu_buffer(first)
+            backend.register_buffer.side_effect = [None, RuntimeError("registration")]
+            with pytest.raises(RuntimeError, match="registration"):
+                ctx.register_gpu_buffer(failed)
+            backend.register_stream.assert_called_once_with(11)
+            backend.deregister_stream.assert_not_called()
+
+            ctx.deregister_gpu_buffer(first)
+            backend.deregister_stream.assert_called_once_with(11)
+        finally:
+            ctx.close()
+        backend.deregister_stream.assert_called_once_with(11)
 
     def test_register_and_deregister_per_stream(self, monkeypatch, backend):
         ctx = GDSContext(backend)
