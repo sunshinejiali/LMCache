@@ -8,6 +8,7 @@ commands, and HTTP endpoints.
    :maxdepth: 1
 
    contributing
+   client_wheel_tooling
    integration
    extending_lmcache/storage_plugins
    usage/index
