@@ -46,6 +46,14 @@ class GDSBackend(ABC):
     a class-level SharedDriver in _driver. Complete DMA and release this context's
     registrations and handles before releasing driver ownership. Only the last
     owner closes the native session; native errors propagate to the caller.
+
+    External wheels register a concrete subclass in ``lmcache.gds_plugins``.
+    The class must have a no-argument constructor and its ``name`` must match
+    the entry-point name. Import and construction must remain driver-free;
+    native resources are acquired by opening slabs or registering buffers.
+    Plugins may implement ``close_driver`` themselves rather than depend on
+    private driver helpers. The existing stream ordering, submission lifetime
+    and IO result contracts also apply to external implementations.
     """
 
     name: ClassVar[str]

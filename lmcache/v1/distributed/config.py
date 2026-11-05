@@ -856,7 +856,8 @@ def add_storage_manager_args(
         "--gds-l1-backend",
         default="auto",
         choices=("auto", *available_backends()),
-        help="GDS backend. auto selects the default for this environment.",
+        help="GDS backend (built-in or installed lmcache.gds_plugins entry point). "
+        "auto selects a built-in default only.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
