@@ -1,0 +1,99 @@
+name: Client wheel E2E consumer (draft)
+
+# No producer is wired yet: #6315/#6316 must provide the canonical artifacts
+# and agree the provenance.json contract before this becomes a release gate.
+on:
+  workflow_call:
+    inputs:
+      server-artifact:
+        description: Full CPU wheel and provenance.json from the canonical producer
+        type: string
+        required: true
+      client-artifact:
+        description: Client CPU wheel and provenance.json from the canonical producer
+        type: string
+        required: true
+      revision:
+        description: Exact 40-character source revision of both artifacts
+        type: string
+        required: true
+      version:
+        description: Exact distribution version of both artifacts
+        type: string
+        required: true
+      python-version:
+        description: Python compatible with both wheels
+        type: string
+        default: '3.12'
+      torch-version:
+        description: CPU PyTorch version used by the native wheel producer
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  installed-wheels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [zmq, grpc]
+    steps:
+      - name: Require producer inputs
+        env:
+          SERVER_ARTIFACT: ${{ inputs.server-artifact }}
+          CLIENT_ARTIFACT: ${{ inputs.client-artifact }}
+          ARTIFACT_REVISION: ${{ inputs.revision }}
+          ARTIFACT_VERSION: ${{ inputs.version }}
+          ARTIFACT_TORCH_VERSION: ${{ inputs.torch-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in SERVER_ARTIFACT CLIENT_ARTIFACT ARTIFACT_REVISION \
+            ARTIFACT_VERSION ARTIFACT_TORCH_VERSION; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Producer input $name must not be empty"
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ inputs.python-version }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.server-artifact }}
+          path: ${{ runner.temp }}/full-wheel
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.client-artifact }}
+          path: ${{ runner.temp }}/client-wheel
+      - run: python -m pip install uv==0.9.2
+      - name: Run isolated installed-wheel E2E
+        env:
+          ARTIFACT_REVISION: ${{ inputs.revision }}
+          ARTIFACT_VERSION: ${{ inputs.version }}
+          ARTIFACT_TORCH_VERSION: ${{ inputs.torch-version }}
+          TEST_TRANSPORT: ${{ matrix.transport }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_dir="${RUNNER_TEMP}/client-wheel-e2e-logs"
+          mkdir -p "$log_dir"
+          python .github/scripts/run_client_wheel_e2e.py \
+            --server-artifacts "${RUNNER_TEMP}/full-wheel" \
+            --client-artifacts "${RUNNER_TEMP}/client-wheel" \
+            --revision "$ARTIFACT_REVISION" \
+            --version "$ARTIFACT_VERSION" \
+            --torch-version "$ARTIFACT_TORCH_VERSION" \
+            --transport "$TEST_TRANSPORT" \
+            --output-dir "$log_dir" 2>&1 | tee "$log_dir/runner.log"
+      - name: Preserve installation, inspection, client, server, and shutdown logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: client-wheel-e2e-${{ matrix.transport }}-logs
+          path: ${{ runner.temp }}/client-wheel-e2e-logs/

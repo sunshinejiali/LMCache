@@ -1,0 +1,32 @@
+name: Client wheel consumer regression tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/client_wheel_probe.py'
+      - '.github/scripts/run_client_wheel_e2e.py'
+      - '.github/workflows/client_wheel_e2e.yml'
+      - '.github/workflows/client_wheel_consumer_tests.yml'
+      - 'tests/ci/test_client_wheel_e2e.py'
+      - '.buildkite/k3_tests/multiprocess/scripts/stop-processes.py'
+      - '.buildkite/k3_tests/multiprocess/scripts/tests/test_stop_processes.py'
+
+permissions:
+  contents: read
+
+jobs:
+  consumer-tests:
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest
+      - name: Test the consumer and reused cleanup helper
+        run: |
+          python -m pytest --confcutdir=tests/ci -q \
+            tests/ci/test_client_wheel_e2e.py \
+            .buildkite/k3_tests/multiprocess/scripts/tests/test_stop_processes.py
