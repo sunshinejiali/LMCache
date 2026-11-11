@@ -6,15 +6,11 @@ Every loaded lmcache module must belong to the selected distribution's RECORD.
 """
 
 # Standard
-from importlib import metadata
+from importlib import import_module, metadata
 from pathlib import Path
 import argparse
 import json
 import sys
-
-# First Party
-from lmcache.v1.client.transport.factory import RequestClientFactory
-import lmcache
 
 
 def verify_installation(distribution_name: str, version: str) -> None:
@@ -61,7 +57,7 @@ def verify_installation(distribution_name: str, version: str) -> None:
                 "distribution": distribution_name,
                 "version": distribution.version,
                 "python": sys.executable,
-                "lmcache": lmcache.__file__,
+                "lmcache": getattr(sys.modules.get("lmcache"), "__file__", None),
                 "imports": imports,
             },
             sort_keys=True,
@@ -81,8 +77,12 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=5)
     args = parser.parse_args()
     verify_installation(args.distribution, args.version)
+    # Keep installed identity in diagnostics when migrated dependencies or
+    # generated bindings are missing.
+    factory = import_module("lmcache.v1.client.transport.factory").RequestClientFactory
+    verify_installation(args.distribution, args.version)
     if args.url:
-        client = RequestClientFactory.create(args.url)
+        client = factory.create(args.url)
         try:
             if client.ping(None).result(timeout=args.timeout) is not True:
                 raise RuntimeError("Server ping did not return True")

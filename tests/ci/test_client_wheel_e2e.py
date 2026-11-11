@@ -179,7 +179,19 @@ def probe_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
     factory = package / "v1/client/transport/factory.py"
     factory.parent.mkdir(parents=True)
     (package / "__init__.py").write_text('__version__ = "0.0.0+e2e"\n')
-    factory.write_text("class RequestClientFactory: pass\n")
+    factory.write_text(
+        "from importlib import import_module\n"
+        "from types import SimpleNamespace\n"
+        "class RequestClientFactory:\n"
+        "    @staticmethod\n"
+        "    def create(url):\n"
+        "        import_module('lmcache.v1.transport.grpc._proto_gen.common_pb2')\n"
+        "        return SimpleNamespace(\n"
+        "            ping=lambda _: SimpleNamespace(result=lambda timeout: True),\n"
+        "            get_chunk_size=lambda: "
+        "SimpleNamespace(result=lambda timeout: 128),\n"
+        "            close=lambda: None)\n"
+    )
     info = site / f"lmcache_client-{VERSION}.dist-info"
     info.mkdir()
     (info / "METADATA").write_text(f"Name: lmcache-client\nVersion: {VERSION}\n")
@@ -191,7 +203,9 @@ def probe_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
     return python, site, probe
 
 
-def probe_command(environment: tuple[Path, Path, Path]) -> subprocess.CompletedProcess:
+def probe_command(
+    environment: tuple[Path, Path, Path], *extra_args: str
+) -> subprocess.CompletedProcess:
     """Execute the real inspection CLI with Python isolation from a temporary cwd."""
     python, _, probe = environment
     return subprocess.run(
@@ -203,6 +217,7 @@ def probe_command(environment: tuple[Path, Path, Path]) -> subprocess.CompletedP
             "lmcache-client",
             "--version",
             VERSION,
+            *extra_args,
         ],
         cwd=probe.parent,
         capture_output=True,
@@ -217,7 +232,52 @@ def test_installed_distribution_is_inspected(
     """The inspector accepts only files recorded by the selected installed wheel."""
     result = probe_command(probe_environment)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["distribution"] == "lmcache-client"
+    assert (
+        json.loads(result.stdout.splitlines()[-1])["distribution"] == "lmcache-client"
+    )
+
+
+def test_missing_transport_retains_installed_identity(
+    probe_environment: tuple[Path, Path, Path],
+) -> None:
+    """Broken wheel imports must not hide the installed distribution metadata."""
+    _, site, _ = probe_environment
+    (site / "lmcache/v1/client/transport/factory.py").unlink()
+    result = probe_command(probe_environment)
+    assert result.returncode != 0
+    identity = json.loads(result.stdout.splitlines()[0])
+    assert identity["distribution"] == "lmcache-client"
+    assert identity["version"] == VERSION
+    assert "ModuleNotFoundError" in result.stderr
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_lazy_shared_binding_must_belong_to_installed_wheel(
+    probe_environment: tuple[Path, Path, Path], recorded: bool
+) -> None:
+    """Post-request inspection must audit lazily imported shared gRPC bindings.
+
+    The fixture client returns constants without networking. This verifies
+    installed-file ownership after factory.create, not an RPC E2E result.
+    """
+    _, site, _ = probe_environment
+    relative = "lmcache/v1/transport/grpc/_proto_gen/common_pb2.py"
+    binding = site / relative
+    binding.parent.mkdir(parents=True)
+    binding.write_text("SCHEMA_VERSION = 1\n")
+    if recorded:
+        with (site / f"lmcache_client-{VERSION}.dist-info/RECORD").open("a") as record:
+            record.write(f"{relative},,\n")
+    result = probe_command(probe_environment, "--url", "grpc://127.0.0.1:1")
+    assert '"ping": true' in result.stdout
+    if recorded:
+        assert result.returncode == 0, result.stderr
+        identity = json.loads(result.stdout.splitlines()[-1])
+        assert "lmcache.v1.transport.grpc._proto_gen.common_pb2" in identity["imports"]
+    else:
+        assert result.returncode != 0
+        assert "Import outside installed wheel" in result.stderr
+        assert "lmcache.v1.transport.grpc._proto_gen.common_pb2" in result.stderr
 
 
 def test_mixed_distributions_fail(probe_environment: tuple[Path, Path, Path]) -> None:
